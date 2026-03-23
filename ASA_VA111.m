@@ -1,105 +1,121 @@
 % =========================================================================
-% TRIDENT: Tactical Acoustic Spectrum (Pure Simulated Engine Output)
-% Ultimate Calibrated Version (PSD Bin Width & Single-Sided Energy Fixed)
+% TRIDENT: 純流體物理縮放引擎 (Pure Hydro-Acoustic Scaling Engine)
+% 零 k-Wave 依賴，專注於 Strouhal 頻移與 V^6 偶極子能量縮放
 % =========================================================================
 clear; clc; close all;
 
-%% 1. 內部驅動參數 (Baseline & Tactical Scaling)
-V1 = 10; D1 = 0.0254;        
-skid_freq = [50, 100, 200, 500, 1000, 3000, 6000, 10000, 20000, 40000];
-skid_ampl = [150, 170, 208, 185, 195, 212, 205, 180, 165, 150];
+fprintf('啟動物理縮放引擎測試...\n');
 
-V2 = 100; D2 = 0.1;           
-va111_freq = skid_freq .* (V2 / V1) .* (D1 / D2);
-va111_ampl = skid_ampl + 40 * log10(V2 / V1);
+%% 1. 定義經驗基準數據庫 (VA-111 Shkval 物理基準)
+% 這些數據是我們縮放的「絕對錨點」
+Baseline.V_ref = 100;       % 基準航速 (m/s)
+Baseline.D_ref = 0.1;       % 基準鼻錐直徑 (m)
+Baseline.SPL_ref = 195;     % 基準總輻射能量峰值 (dB)
+Baseline.f_peak_ref = 500;  % 能量集中低頻峰值 (Hz)
+Baseline.Power_Law = 60;    % 偶極子 V^6 定律 (60 * log10(V))
 
-%% 2. 呼叫 TRIDENT 隨機物理引擎 
-fs = 200000;
-T_sim = 1.0; 
-N_samples = round(T_sim * fs);
+%% 2. 基礎訊號參數
+fs = 500e3;           % 取樣率 500 kHz (足夠涵蓋 20kHz 尋標器頻帶)
+duration = 0.1;       % 生成 0.1 秒的訊號來做頻譜分析
+t_array = 0:(1/fs):(duration - 1/fs);
+N_samples = length(t_array);
+D_target = 0.1;       % 鼻錐直徑保持 10 cm
 
-fprintf('Generating mathematically calibrated stochastic noise field...\n');
-[sig_tail, env_curve, f_env] = generate_spiky_noise(N_samples, fs, va111_freq, va111_ampl);
+%% 3. 測試兩種不同航速的縮放結果
+V_sprint = 100; % 衝刺航速 100 m/s
+V_search = 60;  % 搜索航速 60 m/s
 
-%% 3. 計算真實的功率譜密度 (PSD) - 修正 'psd' 參數
-Nfft = 16384; 
-window = hanning(Nfft);
-% 【關鍵修正 1】：使用 'psd' 確保繪製的是能量密度，避免頻寬陷阱帶來的 11 dB 誤差
-[Pxx_tail, F_psd] = pwelch(sig_tail, window, Nfft/2, Nfft, fs, 'psd'); 
-SPL_tail_sim = 10*log10(Pxx_tail);
+fprintf('生成 %d m/s 噪聲訊號...\n', V_sprint);
+sig_100 = generate_scaled_noise(N_samples, fs, V_sprint, D_target, Baseline);
 
-%% 4. 繪製高學術標準圖表 (只保留曲線與漸近線)
-fig = figure('Color', 'w', 'Position', [100, 100, 1000, 500]);
+fprintf('生成 %d m/s 噪聲訊號...\n', V_search);
+sig_60 = generate_scaled_noise(N_samples, fs, V_search, D_target, Baseline);
+
+%% 4. 頻譜分析與對比繪圖 (證明縮放定律生效)
+window = hanning(N_samples);
+[Pxx_100, F] = pwelch(sig_100, window, [], N_samples, fs, 'onesided');
+[Pxx_60, ~]  = pwelch(sig_60, window, [], N_samples, fs, 'onesided');
+
+% 轉成 dB (基準值 1 uPa)
+p_ref = 1e-6; 
+Pxx_100_dB = 10 * log10(Pxx_100 / (p_ref^2));
+Pxx_60_dB  = 10 * log10(Pxx_60 / (p_ref^2));
+
+% 建立對比圖表
+figure('Color', 'w', 'Position', [100, 100, 900, 500]);
+semilogx(F, Pxx_100_dB, 'r', 'LineWidth', 2, 'DisplayName', '100 m/s');
 hold on; grid on;
+semilogx(F, Pxx_60_dB, 'b', 'LineWidth', 2, 'DisplayName', '60 m/s');
 
-% 繪製理論包絡線/漸近線 (黑色虛線)
-plot(f_env, env_curve, 'k--', 'LineWidth', 2.0, 'DisplayName', 'Theoretical $f^{-2}$ Envelope');
+% 標示 20kHz 尋標器工作頻率的底噪差異
+freq_check = 20000; 
+[~, idx_20k] = min(abs(F - freq_check));
+plot(freq_check, Pxx_100_dB(idx_20k), 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r', 'HandleVisibility','off');
+plot(freq_check, Pxx_60_dB(idx_20k), 'bo', 'MarkerSize', 8, 'MarkerFaceColor', 'b', 'HandleVisibility','off');
 
-% 繪製引擎生成的真實噪聲頻譜 (藍色尖刺線)
-plot(F_psd, SPL_tail_sim, 'b', 'LineWidth', 0.8, 'DisplayName', 'Simulated Tail Source PSD (Time-Domain Synthesis)');
+text(freq_check * 1.1, Pxx_100_dB(idx_20k) + 5, sprintf('%.1f dB', Pxx_100_dB(idx_20k)), 'Color', 'r', 'FontSize', 11, 'FontWeight', 'bold');
+text(freq_check * 1.1, Pxx_60_dB(idx_20k) - 5, sprintf('%.1f dB', Pxx_60_dB(idx_20k)), 'Color', 'b', 'FontSize', 11, 'FontWeight', 'bold');
 
-% 圖表格式設定
-set(gca, 'XScale', 'log');
-xlim([10, 100000]);
-ylim([120, max(va111_ampl) + 15]);
+xlim([100, 100000]); 
+ylim([100, 210]);
 xlabel('Frequency (Hz)', 'FontSize', 12, 'FontWeight', 'bold');
-% 【嚴謹細節】：PSD 的標準單位是 dB re 1\muPa^2/Hz
-ylabel('Sound Pressure Level (dB re 1\muPa^2/Hz)', 'FontSize', 12, 'FontWeight', 'bold'); 
-title('Simulated Supercavitating Tactical Noise Spectrum (100 m/s Regime)', 'FontSize', 14);
+ylabel('Power Spectral Density (dB re 1\muPa^2/Hz)', 'FontSize', 12, 'FontWeight', 'bold');
+title('Hydro-Acoustic Scaling Engine Verification (Dipole V^6 Law)', 'FontSize', 14);
+legend('Location', 'northeast', 'FontSize', 11);
 
-leg = legend('Location', 'northeast', 'FontSize', 11);
-set(leg, 'Interpreter', 'latex');
+fprintf('縮放測試完成。請檢查繪出的頻譜對比圖。\n');
 
+%% ========================================================================
+% 核心縮放引擎函數 (Pure Scaling Logic)
 % =========================================================================
-% 隨機物理引擎 (包含連續譜與洛倫茲尖刺，單邊能量校準)
-% =========================================================================
-function [sig_noise, target_curve_dB_full, f_interp] = generate_spiky_noise(N_samples, fs, peak_freqs, peak_ampls)
-    rand_phase = 2 * pi * rand(N_samples, 1) - pi;
+function sig_noise = generate_scaled_noise(N_samples, fs, V_target, D_target, Baseline)
+    % 1. 建立頻率軸
     df = fs / N_samples;
     f_full = (0:N_samples-1)' * df;
     
     f_interp = f_full;
     idx_neg = f_full > fs/2;
-    f_interp(idx_neg) = fs - f_full(idx_neg);
+    f_interp(idx_neg) = fs - f_full(idx_neg); 
     
-    % 基線連續譜
-    base_level = max(peak_ampls) - 45; 
-    target_curve_dB_full = base_level * ones(size(f_interp));
+    % 2. 執行物理縮放 (Physics Scaling)
+    % Strouhal 頻率偏移
+    f_peak_current = Baseline.f_peak_ref * (V_target / Baseline.V_ref) * (Baseline.D_ref / D_target);
+    % V^6 偶極子能量縮放
+    SPL_peak_current = Baseline.SPL_ref + Baseline.Power_Law * log10(V_target / Baseline.V_ref);
     
-    % 高頻段慣性次區衰減 (-20dB/dec)
-    f_decay_start = peak_freqs(end);
-    idx_high = f_interp > f_decay_start;
-    target_curve_dB_full(idx_high) = base_level - 20*log10(f_interp(idx_high) / f_decay_start);
-    
-    % 注入洛倫茲諧波尖刺
-    for i = 1:length(peak_freqs)
-        Q = 40; 
-        bw = peak_freqs(i) / Q;
-        spike_profile = peak_ampls(i) - 10*log10(1 + 4*((f_interp - peak_freqs(i))/bw).^2);
-        target_curve_dB_full = max(target_curve_dB_full, spike_profile);
+    % 3. 建構目標頻譜包絡 (Envelope)
+    target_curve_dB = zeros(size(f_interp));
+    for i = 1:length(f_interp)
+        f = f_interp(i);
+        if f <= f_peak_current
+            % 低頻段：能量快速爬升至峰值
+            target_curve_dB(i) = SPL_peak_current - 20 * log10(f_peak_current / max(f, 1));
+        else
+            % 高頻段：嚴格套用 TBL 湍流衰減定律 (-16 dB / decade)
+            target_curve_dB(i) = SPL_peak_current - 16 * log10(f / f_peak_current); 
+        end
     end
     
-    target_curve_dB_full(1) = -200; 
+    % 濾除直流與極高頻防呆
+    target_curve_dB(1) = -200; 
+    target_curve_dB(f_interp > fs/2.1) = -300; 
     
-    % 轉換回時域
-    P_linear = 10.^(target_curve_dB_full / 10);
-    Mag_Shape = sqrt(P_linear); 
-    Spec_Complex = Mag_Shape .* exp(1j * rand_phase);
+    % 4. 將 dB 轉回真實壓力幅值
+    p_ref = 1e-6;
+    P_linear_Pa2 = (p_ref^2) * 10.^(target_curve_dB / 10);
+    Mag_Shape = sqrt(P_linear_Pa2); 
+    
+    % 5. 結合隨機相位生成時域訊號 (IFFT)
+    rand_phase = 2 * pi * rand(N_samples, 1) - pi;
+    half_len = floor(N_samples/2) + 1;
+    Spec_Complex = zeros(N_samples, 1);
+    Spec_Complex(1:half_len) = Mag_Shape(1:half_len) .* exp(1j * rand_phase(1:half_len));
+    Spec_Complex(half_len+1:end) = conj(flipud(Spec_Complex(2:ceil(N_samples/2))));
+    
     sig_raw = real(ifft(Spec_Complex));
     
-    % 【關鍵修正 2】：能量標準化嚴格限制在單邊頻譜，消除 3dB 折疊誤差
-    half_len = floor(N_samples/2) + 1;
-    Total_Target_Power = sum(P_linear(1:half_len)) * df; 
+    % 6. 精準能量標準化 (確保時域的變異數等於頻譜總能量)
+    Total_Target_Power_Pa2 = sum(P_linear_Pa2(1:half_len)) * df; 
     Actual_Power = var(sig_raw);
-    
-    if Actual_Power > 0
-        sig_noise = sig_raw * sqrt(Total_Target_Power / Actual_Power);
-    else
-        sig_noise = zeros(size(sig_raw));
-    end
-    sig_noise = sig_noise(:);
-    
-    % 確保回傳的理論曲線對齊正確的頻率長度
-    target_curve_dB_full = target_curve_dB_full(1:half_len);
-    f_interp = f_full(1:half_len);
+    sig_noise = sig_raw * sqrt(Total_Target_Power_Pa2 / Actual_Power);
 end
